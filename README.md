@@ -5,6 +5,10 @@ Routes requests to the correct regional upstream API by detecting the storefront
 region of each `adamId` via iTunes lookup, with an AdGuard‑Home‑style admin
 dashboard.
 
+It aggregates [WorldObservationLog/wrapper](https://github.com/WorldObservationLog/wrapper/tree/lite)
+instances — the underlying single-port Apple Music decryption wrapper — and
+exposes their endpoints on one unified port.
+
 ## Features
 
 - **Single‑port aggregation** — expose `/m3u8`, `/key`, `/lyrics`,
@@ -206,6 +210,7 @@ curl -b cookies.txt "http://localhost:8080/m3u8?adamId=111111111"  # even -> US 
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
 
 
