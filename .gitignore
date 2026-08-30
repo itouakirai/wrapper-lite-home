@@ -1,0 +1,22 @@
+# binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# local config & secrets
+config.json
+
+# runtime data
+data/
+*.tmp
+
+# test artifacts
+e2e-*.json
+testdata/*.exe
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

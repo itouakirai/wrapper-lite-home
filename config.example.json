@@ -1,0 +1,35 @@
+{
+  "listen": ":8080",
+  "auth": {
+    "username": "admin",
+    "password": "admin"
+  },
+  "session_ttl": "24h",
+  "region": {
+    "cache_ttl": "30m",
+    "not_found_ttl": "10m",
+    "concurrency": 4,
+    "lookup_timeout": "5s",
+    "itunes_lookup_base": "https://itunes.apple.com/lookup"
+  },
+  "probe": {
+    "interval": "1m",
+    "retries": 3,
+    "retry_delay": "2s",
+    "backoff_interval": "10m",
+    "timeout": "5s"
+  },
+  "upstream_timeout": "30s",
+  "stats_file": "data/stats.json",
+  "stats_save_interval": "30s",
+  "upstreams": [
+    {
+      "name": "US API",
+      "base_url": "http://127.0.0.1:3001"
+    },
+    {
+      "name": "CN API",
+      "base_url": "http://127.0.0.1:3002"
+    }
+  ]
+}
