@@ -1,11 +1,15 @@
 // Package stats records request counts (total, per upstream, per endpoint,
-// hourly per day) and health-probe results, persisting them to a JSON file.
+// hourly per day, client IPs) and health-probe results, persisting them to a
+// JSON file.
 package stats
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +20,7 @@ type DayStats struct {
 	Total     int64            `json:"total"`
 	Upstreams map[string]int64 `json:"upstreams"`
 	Endpoints map[string]int64 `json:"endpoints"`
+	ClientIPs map[string]int64 `json:"client_ips,omitempty"`
 }
 
 type ProbeDay struct {
@@ -27,18 +32,20 @@ type Data struct {
 	Days           map[string]*DayStats            `json:"days"`
 	Total          int64                           `json:"total"`
 	UpstreamsTotal map[string]int64                `json:"upstreams_total"`
+	ClientIPsTotal map[string]int64                `json:"client_ips_total,omitempty"`
 	Probes         map[string]map[string]*ProbeDay `json:"probes"` // day -> upstream -> up/down
 }
 
 type Stats struct {
-	mu        sync.Mutex
-	data      Data
-	file      string
-	interval  time.Duration
-	dirty     bool
-	started   bool
-	done      chan struct{}
-	startTime time.Time
+	mu           sync.Mutex
+	data         Data
+	file         string
+	interval     time.Duration
+	maxClientIPs int
+	dirty        bool
+	started      bool
+	done         chan struct{}
+	startTime    time.Time
 }
 
 func New(file string, interval time.Duration) *Stats {
@@ -49,13 +56,33 @@ func New(file string, interval time.Duration) *Stats {
 		data: Data{
 			Days:           map[string]*DayStats{},
 			UpstreamsTotal: map[string]int64{},
+			ClientIPsTotal: map[string]int64{},
 			Probes:         map[string]map[string]*ProbeDay{},
 		},
-		file:      file,
-		interval:  interval,
-		done:      make(chan struct{}),
-		startTime: time.Now(),
+		file:         file,
+		interval:     interval,
+		maxClientIPs: 10000,
+		done:         make(chan struct{}),
+		startTime:    time.Now(),
 	}
+}
+
+func (s *Stats) SetSaveInterval(d time.Duration) {
+	if d <= 0 {
+		d = 30 * time.Second
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.interval = d
+}
+
+func (s *Stats) SetMaxClientIPs(n int) {
+	if n <= 0 {
+		n = 10000
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxClientIPs = n
 }
 
 func (s *Stats) Start() {
@@ -82,11 +109,21 @@ func (s *Stats) Stop() {
 }
 
 func (s *Stats) saveLoop() {
-	t := time.NewTicker(s.interval)
-	defer t.Stop()
 	for {
+		s.mu.Lock()
+		interval := s.interval
+		started := s.started
+		s.mu.Unlock()
+		if !started {
+			return
+		}
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		t := time.NewTimer(interval)
 		select {
 		case <-s.done:
+			t.Stop()
 			return
 		case <-t.C:
 			s.saveIfDirty()
@@ -99,11 +136,7 @@ func (s *Stats) Incr(upstreamName, endpoint string) {
 	defer s.mu.Unlock()
 	now := time.Now()
 	day := now.Format("2006-01-02")
-	ds := s.data.Days[day]
-	if ds == nil {
-		ds = &DayStats{Date: day, Upstreams: map[string]int64{}, Endpoints: map[string]int64{}}
-		s.data.Days[day] = ds
-	}
+	ds := s.dayLocked(day)
 	ds.Total++
 	ds.Hourly[now.Hour()]++
 	if upstreamName != "" {
@@ -115,6 +148,51 @@ func (s *Stats) Incr(upstreamName, endpoint string) {
 	}
 	s.data.Total++
 	s.dirty = true
+}
+
+// RecordClientIP counts a client request to the public proxy endpoints.
+func (s *Stats) RecordClientIP(rawIP string) {
+	ip := normalizeIP(rawIP)
+	if ip == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.ClientIPsTotal[ip] == 0 && len(s.data.ClientIPsTotal) >= s.maxClientIPs {
+		return
+	}
+	now := time.Now()
+	day := now.Format("2006-01-02")
+	ds := s.dayLocked(day)
+	if ds.ClientIPs == nil {
+		ds.ClientIPs = map[string]int64{}
+	}
+	ds.ClientIPs[ip]++
+	s.data.ClientIPsTotal[ip]++
+	s.dirty = true
+}
+
+func (s *Stats) dayLocked(day string) *DayStats {
+	ds := s.data.Days[day]
+	if ds == nil {
+		ds = &DayStats{
+			Date:      day,
+			Upstreams: map[string]int64{},
+			Endpoints: map[string]int64{},
+			ClientIPs: map[string]int64{},
+		}
+		s.data.Days[day] = ds
+	}
+	if ds.Upstreams == nil {
+		ds.Upstreams = map[string]int64{}
+	}
+	if ds.Endpoints == nil {
+		ds.Endpoints = map[string]int64{}
+	}
+	if ds.ClientIPs == nil {
+		ds.ClientIPs = map[string]int64{}
+	}
+	return ds
 }
 
 func (s *Stats) RecordProbe(upstreamName string, up bool) {
@@ -178,13 +256,21 @@ type DaySummary struct {
 	Total int64  `json:"total"`
 }
 
+type IPRank struct {
+	IP    string `json:"ip"`
+	Count int64  `json:"count"`
+}
+
 type Snapshot struct {
-	Total          int64            `json:"total"`
-	Today          TodayStats       `json:"today"`
-	UpstreamsTotal map[string]int64 `json:"upstreams_total"`
-	Days           []DaySummary     `json:"days"`
-	StartTime      time.Time        `json:"start_time"`
-	Now            time.Time        `json:"now"`
+	Total            int64            `json:"total"`
+	Today            TodayStats       `json:"today"`
+	UpstreamsTotal   map[string]int64 `json:"upstreams_total"`
+	Days             []DaySummary     `json:"days"`
+	ClientIPsToday   []IPRank         `json:"client_ips_today"`
+	ClientIPsTotal   []IPRank         `json:"client_ips_total"`
+	TrackedClientIPs int              `json:"tracked_client_ips"`
+	StartTime        time.Time        `json:"start_time"`
+	Now              time.Time        `json:"now"`
 }
 
 func (s *Stats) Snapshot(days int) Snapshot {
@@ -197,6 +283,7 @@ func (s *Stats) Snapshot(days int) Snapshot {
 		Endpoints: map[string]int64{},
 		Hour:      now.Hour(),
 	}
+	var todayIPs map[string]int64
 	if ds := s.data.Days[today]; ds != nil {
 		ts.Total = ds.Total
 		ts.Hourly = ds.Hourly
@@ -206,13 +293,17 @@ func (s *Stats) Snapshot(days int) Snapshot {
 		for k, v := range ds.Endpoints {
 			ts.Endpoints[k] = v
 		}
+		todayIPs = ds.ClientIPs
 	}
 	snap := Snapshot{
-		Total:          s.data.Total,
-		Today:          ts,
-		UpstreamsTotal: map[string]int64{},
-		StartTime:      s.startTime,
-		Now:            now,
+		Total:            s.data.Total,
+		Today:            ts,
+		UpstreamsTotal:   map[string]int64{},
+		ClientIPsToday:   topIPs(todayIPs, 20),
+		ClientIPsTotal:   topIPs(s.data.ClientIPsTotal, 20),
+		TrackedClientIPs: len(s.data.ClientIPsTotal),
+		StartTime:        s.startTime,
+		Now:              now,
 	}
 	for k, v := range s.data.UpstreamsTotal {
 		snap.UpstreamsTotal[k] = v
@@ -229,6 +320,40 @@ func (s *Stats) Snapshot(days int) Snapshot {
 		snap.Days = append(snap.Days, sum)
 	}
 	return snap
+}
+
+func topIPs(counts map[string]int64, limit int) []IPRank {
+	out := make([]IPRank, 0, len(counts))
+	for ip, count := range counts {
+		if count > 0 {
+			out = append(out, IPRank{IP: ip, Count: count})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count == out[j].Count {
+			return out[i].IP < out[j].IP
+		}
+		return out[i].Count > out[j].Count
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func normalizeIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	raw = strings.Trim(raw, "[]")
+	if idx := strings.IndexByte(raw, '%'); idx >= 0 {
+		raw = raw[:idx]
+	}
+	return raw
 }
 
 func (s *Stats) saveIfDirty() {
@@ -286,6 +411,9 @@ func (s *Stats) Load() error {
 	}
 	if data.UpstreamsTotal == nil {
 		data.UpstreamsTotal = map[string]int64{}
+	}
+	if data.ClientIPsTotal == nil {
+		data.ClientIPsTotal = map[string]int64{}
 	}
 	if data.Probes == nil {
 		data.Probes = map[string]map[string]*ProbeDay{}

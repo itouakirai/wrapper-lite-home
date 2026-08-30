@@ -59,22 +59,8 @@ type Manager struct {
 }
 
 func NewManager(cfg config.Config, st *stats.Stats) *Manager {
-	timeout := cfg.Probe.Timeout.Duration()
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	m := &Manager{
-		client: &http.Client{Timeout: timeout},
-		cfg:    cfg.Probe,
-		stats:  st,
-	}
-	for _, u := range cfg.Upstreams {
-		m.upstreams = append(m.upstreams, &Upstream{
-			Name:    u.Name,
-			BaseURL: strings.TrimRight(u.BaseURL, "/"),
-			Enabled: u.IsEnabled(),
-		})
-	}
+	m := &Manager{stats: st}
+	m.applyConfigLocked(cfg, nil)
 	return m
 }
 
@@ -101,20 +87,79 @@ func (m *Manager) Stop() {
 
 func (m *Manager) loop(ctx context.Context) {
 	defer m.wg.Done()
-	interval := m.cfg.Interval.Duration()
-	if interval <= 0 {
-		interval = time.Minute
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
+		m.mu.RLock()
+		interval := m.cfg.Interval.Duration()
+		m.mu.RUnlock()
+		if interval <= 0 {
+			interval = time.Minute
+		}
+		t := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 			m.ProbeAll()
 		}
 	}
+}
+
+// ApplyConfig hot-reloads upstream definitions and probe settings, preserving
+// runtime state for unchanged upstreams.
+func (m *Manager) ApplyConfig(cfg config.Config) {
+	m.mu.Lock()
+	m.applyConfigLocked(cfg, m.upstreams)
+	m.mu.Unlock()
+	m.ProbeAllAsync()
+}
+
+func (m *Manager) applyConfigLocked(cfg config.Config, old []*Upstream) {
+	timeout := cfg.Probe.Timeout.Duration()
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	m.client = &http.Client{Timeout: timeout}
+	m.cfg = cfg.Probe
+
+	oldByName := make(map[string]*Upstream, len(old))
+	for _, u := range old {
+		oldByName[u.Name] = u
+	}
+	ups := make([]*Upstream, 0, len(cfg.Upstreams))
+	for _, u := range cfg.Upstreams {
+		base := strings.TrimRight(u.BaseURL, "/")
+		enabled := u.IsEnabled()
+		existing := oldByName[u.Name]
+		if existing != nil {
+			existing.mu.Lock()
+			if existing.BaseURL == base {
+				existing.Enabled = enabled
+			} else {
+				existing.BaseURL = base
+				existing.Enabled = enabled
+				existing.Online = false
+				existing.Regions = nil
+				existing.LatencyMs = 0
+				existing.ConsecutiveFailures = 0
+				existing.Backoff = false
+				existing.LastError = ""
+			}
+			existing.mu.Unlock()
+			ups = append(ups, existing)
+			continue
+		}
+		ups = append(ups, &Upstream{
+			Name:    u.Name,
+			BaseURL: base,
+			Enabled: enabled,
+		})
+	}
+	m.upstreams = ups
+}
+
+func (m *Manager) ProbeAllAsync() {
+	go m.ProbeAll()
 }
 
 func (m *Manager) ProbeAll() {
@@ -124,13 +169,19 @@ func (m *Manager) ProbeAll() {
 	m.mu.RUnlock()
 
 	for _, u := range ups {
-		if !u.Enabled {
+		m.mu.RLock()
+		backoffInterval := m.cfg.BackoffInterval.Duration()
+		m.mu.RUnlock()
+
+		u.mu.Lock()
+		enabled := u.Enabled
+		backoff := u.Backoff
+		last := u.LastCheck
+		u.mu.Unlock()
+		if !enabled {
 			continue
 		}
-		u.mu.Lock()
-		skip := u.Backoff && time.Since(u.LastCheck) < m.cfg.BackoffInterval.Duration()
-		u.mu.Unlock()
-		if skip {
+		if backoff && backoffInterval > 0 && time.Since(last) < backoffInterval {
 			continue
 		}
 		m.probe(u)
@@ -142,15 +193,20 @@ func (m *Manager) ProbeAll() {
 // is marked offline and switched to backoff mode (probed every
 // backoff_interval instead of every interval).
 func (m *Manager) probe(u *Upstream) {
-	retries := m.cfg.Retries
+	m.mu.RLock()
+	cfg := m.cfg
+	client := m.client
+	m.mu.RUnlock()
+
+	retries := cfg.Retries
 	if retries < 0 {
 		retries = 0
 	}
-	retryDelay := m.cfg.RetryDelay.Duration()
+	retryDelay := cfg.RetryDelay.Duration()
 	if retryDelay <= 0 {
 		retryDelay = time.Second
 	}
-	backoffInterval := m.cfg.BackoffInterval.Duration()
+	backoffInterval := cfg.BackoffInterval.Duration()
 	if backoffInterval <= 0 {
 		backoffInterval = 10 * time.Minute
 	}
@@ -159,7 +215,7 @@ func (m *Manager) probe(u *Upstream) {
 	var latency time.Duration
 	var err error
 	for attempt := 0; attempt <= retries; attempt++ {
-		regions, latency, err = m.fetchStatus(u.BaseURL)
+		regions, latency, err = m.fetchStatus(client, u.BaseURL)
 		if err == nil && len(regions) == 0 {
 			err = fmt.Errorf("status returned empty regions")
 		}
@@ -194,7 +250,7 @@ func (m *Manager) probe(u *Upstream) {
 	}
 }
 
-func (m *Manager) fetchStatus(baseURL string) ([]string, time.Duration, error) {
+func (m *Manager) fetchStatus(client *http.Client, baseURL string) ([]string, time.Duration, error) {
 	start := time.Now()
 	req, err := http.NewRequest(http.MethodGet, baseURL+"/status", nil)
 	if err != nil {
@@ -202,7 +258,7 @@ func (m *Manager) fetchStatus(baseURL string) ([]string, time.Duration, error) {
 	}
 	req.Header.Set("User-Agent", "wrapper-lite/1.0")
 	req.Header.Set("Accept", "application/json")
-	resp, err := m.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -235,11 +291,8 @@ func (m *Manager) Regions() []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, u := range m.upstreams {
-		if !u.Enabled {
-			continue
-		}
 		u.mu.Lock()
-		if u.Online {
+		if u.Enabled && u.Online {
 			for _, r := range u.Regions {
 				if !seen[r] {
 					seen[r] = true
@@ -259,11 +312,8 @@ func (m *Manager) OnlineSupporting(region string) []*Upstream {
 	defer m.mu.RUnlock()
 	var out []*Upstream
 	for _, u := range m.upstreams {
-		if !u.Enabled {
-			continue
-		}
 		u.mu.Lock()
-		online := u.Online
+		online := u.Enabled && u.Online
 		supports := false
 		if online {
 			for _, r := range u.Regions {

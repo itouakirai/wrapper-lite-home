@@ -229,3 +229,52 @@ body {
 .table-bar { flex: 1; height: 8px; background: var(--bg-2); border-radius: 4px; overflow: hidden; }
 .table-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
 .table-empty { color: var(--muted); font-size: 13px; padding: 16px 0; text-align: center; }
+
+/* ---------- upstream admin ---------- */
+.upstream-admin { display: flex; flex-direction: column; gap: 16px; }
+.upstream-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto auto;
+  gap: 12px;
+  align-items: end;
+}
+.upstream-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.upstream-form input[type="text"],
+.upstream-form input[type="url"] {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 14px;
+}
+.checkbox-label { flex-direction: row !important; align-items: center; gap: 8px !important; }
+.form-message { font-size: 13px; color: var(--green); }
+.form-message.error { color: #ffb3ae; }
+.upstream-list { display: flex; flex-direction: column; gap: 8px; }
+.upstream-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.upstream-row:last-child { border-bottom: none; }
+.upstream-main { min-width: 0; }
+.upstream-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upstream-url { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upstream-meta { display: flex; gap: 6px; }
+.upstream-actions { display: flex; gap: 8px; }
+.btn { border: 1px solid var(--border); background: var(--bg-2); color: var(--text); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.btn:hover { background: var(--card-hover); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-ghost { background: transparent; }
+.btn-small { padding: 6px 9px; font-size: 12px; }
+.btn-danger { color: #ffb3ae; border-color: rgba(255, 92, 92, 0.35); }
+@media (max-width: 860px) {
+  .upstream-form { grid-template-columns: 1fr; }
+  .upstream-row { grid-template-columns: 1fr; }
+  .upstream-actions { justify-content: flex-end; }
+}

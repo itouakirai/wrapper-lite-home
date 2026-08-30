@@ -25,13 +25,11 @@ func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfgMgr, err := config.NewManager(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	if err := cfg.Validate(); err != nil {
-		log.Fatalf("invalid config: %v", err)
-	}
+	cfg := cfgMgr.Get()
 	if cfg.Auth.Password == "admin" {
 		log.Println("warning: you are using the default admin password, please change it in the config")
 	}
@@ -40,6 +38,7 @@ func main() {
 	if err := st.Load(); err != nil {
 		log.Printf("warning: load stats: %v", err)
 	}
+	st.SetMaxClientIPs(cfg.MaxClientIPs)
 	st.Start()
 
 	authSvc := auth.New(cfg.Auth.Username, cfg.Auth.Password, cfg.SessionTTL.Duration())
@@ -55,7 +54,21 @@ func main() {
 		LookupBase:    cfg.Region.LookupBase,
 	})
 
-	srv := server.New(cfg, authSvc, st, up, det)
+	srv := server.New(cfgMgr, authSvc, st, up, det)
+	lastListen := cfg.Listen
+	applyConfig := func() {
+		next := cfgMgr.Get()
+		if next.Listen != lastListen {
+			log.Printf("config listen changed from %s to %s; restart required to bind the new address", lastListen, next.Listen)
+			lastListen = next.Listen
+		}
+		srv.ApplyConfig()
+	}
+	cfgMgr.SetOnChange(applyConfig)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cfgMgr.Watch(ctx, cfg.ReloadInterval.Duration())
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -75,9 +88,10 @@ func main() {
 	<-sig
 
 	log.Println("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
+	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
 	up.Stop()
 	st.Stop()
 	log.Println("bye")

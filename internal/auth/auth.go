@@ -15,42 +15,55 @@ import (
 const pbkdf2Iterations = 100_000
 
 type Auth struct {
+	mu           sync.Mutex
 	username     string
 	passwordHash []byte
 	salt         []byte
 	ttl          time.Duration
-
-	mu       sync.Mutex
-	sessions map[string]time.Time
+	sessions     map[string]time.Time
 }
 
 func New(username, password string, ttl time.Duration) *Auth {
+	a := &Auth{ttl: ttl, sessions: make(map[string]time.Time)}
+	a.SetCredentials(username, password, ttl)
+	return a
+}
+
+// SetCredentials updates the active admin credentials. Existing sessions stay
+// valid until they expire; new logins use the updated username/password.
+func (a *Auth) SetCredentials(username, password string, ttl time.Duration) {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
 	salt := sha256.Sum256([]byte("wrapper-lite:" + username))
-	return &Auth{
-		username:     username,
-		passwordHash: pbkdf2Key([]byte(password), salt[:], pbkdf2Iterations, 32),
-		salt:         salt[:],
-		ttl:          ttl,
-		sessions:     make(map[string]time.Time),
-	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.username = username
+	a.passwordHash = pbkdf2Key([]byte(password), salt[:], pbkdf2Iterations, 32)
+	a.salt = salt[:]
+	a.ttl = ttl
 }
 
 func (a *Auth) Login(username, password string) (string, bool) {
-	if username != a.username {
+	a.mu.Lock()
+	wantUser := a.username
+	salt := append([]byte(nil), a.salt...)
+	wantHash := append([]byte(nil), a.passwordHash...)
+	ttl := a.ttl
+	a.mu.Unlock()
+
+	if username != wantUser {
 		return "", false
 	}
-	hash := pbkdf2Key([]byte(password), a.salt, pbkdf2Iterations, 32)
-	if subtle.ConstantTimeCompare(hash, a.passwordHash) != 1 {
+	hash := pbkdf2Key([]byte(password), salt, pbkdf2Iterations, 32)
+	if subtle.ConstantTimeCompare(hash, wantHash) != 1 {
 		return "", false
 	}
 	token := randomToken()
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.purgeExpiredLocked()
-	a.sessions[token] = time.Now().Add(a.ttl)
-	a.mu.Unlock()
+	a.sessions[token] = time.Now().Add(ttl)
 	return token, true
 }
 

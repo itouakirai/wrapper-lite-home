@@ -27,9 +27,14 @@ their endpoints on one unified port. It is designed specifically for the
   If it fails 3 consecutive times the upstream is marked offline and probed
   only every 10 minutes (backoff). Empty regions are also treated as offline.
 - **Admin dashboard** — login‑protected web UI showing daily request
-  statistics, per‑API breakdowns, and uptime‑Kuma‑style status cards.
-- **Statistics** — total / per‑upstream / per‑endpoint counts, hourly
-  breakdown, and 7‑day history, persisted to a JSON file.
+  statistics, client IP rankings, per‑API breakdowns, and uptime‑Kuma‑style
+  status cards.
+- **Hot reload** — most configuration changes are detected and applied without
+  restarting the process. The listen address still requires a restart.
+- **Runtime upstream management** — add, enable/disable, and delete upstream
+  APIs from the admin dashboard; changes are persisted to the config file.
+- **Statistics** — total / per‑upstream / per‑endpoint counts, client IP
+  rankings, hourly breakdown, and 7‑day history, persisted to a JSON file.
 - **Zero external dependencies** — built entirely on the Go standard library.
 
 ## Configuration
@@ -61,6 +66,9 @@ Copy `config.example.json` to `config.json` and adjust:
   "upstream_timeout": "30s",
   "stats_file": "data/stats.json",
   "stats_save_interval": "30s",
+  "reload_interval": "2s",
+  "trust_proxy_headers": false,
+  "max_client_ips": 10000,
   "upstreams": [
     {
       "name": "US API",
@@ -95,6 +103,9 @@ Copy `config.example.json` to `config.json` and adjust:
 | `upstream_timeout` | `30s` | Timeout for proxied upstream requests |
 | `stats_file` | `data/stats.json` | Path to the statistics persistence file |
 | `stats_save_interval` | `30s` | How often to flush stats to disk |
+| `reload_interval` | `2s` | How often to poll the config file for hot reload |
+| `trust_proxy_headers` | `false` | Use `X-Forwarded-For` / `X-Real-IP` for client IP ranking. Enable only behind a trusted reverse proxy |
+| `max_client_ips` | `10000` | Maximum distinct client IPs kept in the ranking counters |
 | `upstreams[].name` | — | A human‑readable name shown in the dashboard |
 | `upstreams[].base_url` | — | Base URL of the upstream wrapper API |
 | `upstreams[].enabled` | `true` | Whether this upstream is active |
@@ -132,19 +143,37 @@ All admin endpoints require authentication. Provide the session cookie
 | `/api/logout` | POST | Clears the session |
 | `/api/me` | GET | Returns current username |
 | `/api/status` | GET | Upstream snapshots (online, regions, latency, uptime, backoff) |
-| `/api/stats` | GET | Request statistics (total, today hourly, 7‑day, per‑upstream, per‑endpoint) |
+| `/api/stats` | GET | Request statistics (total, today hourly, 7‑day, per‑upstream, per‑endpoint, client IP ranking) |
+| `/api/upstreams` | POST | Add an upstream: `{"name":"...","base_url":"...","enabled":true}` |
+| `/api/upstreams/{name}` | PATCH | Enable/disable an upstream: `{"enabled":true}` |
+| `/api/upstreams/{name}` | DELETE | Delete an upstream |
 
 ## Admin Dashboard
 
 Open `http://<host>:<port>/` in a browser. The dashboard shows:
 
 - **Stats cards** — total requests, today's count, online upstreams, merged regions
+- **Upstream management** — add, enable/disable, and delete upstream APIs
+  without editing the config file manually
 - **Uptime cards** — one per upstream, with online/offline/backoff indicators,
   region badges, latency, uptime percentage, and last check time
 - **Hourly chart** — today's requests broken down by hour
 - **7‑day chart** — daily totals for the last 7 days
 - **Per‑API breakdown** — horizontal bar chart of requests per upstream
 - **Per‑endpoint breakdown** — today's requests by endpoint (/m3u8, /key, etc.)
+- **Client IP ranking** — today's and all-time top client IPs for public proxy
+  requests
+
+## Hot reload
+
+The config file is polled every `reload_interval`. Changes to auth, session
+TTL, region detection, probe settings, upstream timeout, stats settings,
+client IP ranking settings, and upstreams are applied without restarting.
+Changing `listen` still requires a restart because the HTTP server socket is
+already bound.
+
+When you add or delete an upstream from the dashboard, wrapper-lite writes the
+change back to the same config file and applies it immediately.
 
 ## Region routing logic
 

@@ -25,11 +25,10 @@ type Options struct {
 }
 
 type Detector struct {
-	opts   Options
-	client *http.Client
-
-	mu        sync.Mutex
-	cache     map[string]map[string]regionResult // adamID -> region -> result
+	mu        sync.RWMutex
+	opts      Options
+	client    *http.Client
+	cache     map[string]map[string]regionResult
 	flights   map[string]*flight
 	lastClean time.Time
 }
@@ -46,8 +45,33 @@ type flight struct {
 }
 
 func NewDetector(opts Options) *Detector {
+	opts = normalizeOptions(opts)
+	return &Detector{
+		opts:    opts,
+		client:  &http.Client{Timeout: opts.LookupTimeout},
+		cache:   make(map[string]map[string]regionResult),
+		flights: make(map[string]*flight),
+	}
+}
+
+// SetOptions hot-reloads detector options while preserving the cache.
+func (d *Detector) SetOptions(opts Options) {
+	opts = normalizeOptions(opts)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.opts = opts
+	d.client = &http.Client{Timeout: opts.LookupTimeout}
+}
+
+func normalizeOptions(opts Options) Options {
 	if opts.Concurrency < 1 {
 		opts.Concurrency = 4
+	}
+	if opts.CacheTTL <= 0 {
+		opts.CacheTTL = 30 * time.Minute
+	}
+	if opts.NotFoundTTL <= 0 {
+		opts.NotFoundTTL = 10 * time.Minute
 	}
 	if opts.LookupTimeout <= 0 {
 		opts.LookupTimeout = 5 * time.Second
@@ -55,12 +79,7 @@ func NewDetector(opts Options) *Detector {
 	if opts.LookupBase == "" {
 		opts.LookupBase = "https://itunes.apple.com/lookup"
 	}
-	return &Detector{
-		opts:    opts,
-		client:  &http.Client{Timeout: opts.LookupTimeout},
-		cache:   make(map[string]map[string]regionResult),
-		flights: make(map[string]*flight),
-	}
+	return opts
 }
 
 // Detect returns the subset of regions where the adamId exists
@@ -76,7 +95,6 @@ func (d *Detector) Detect(ctx context.Context, adamID string, regions []string) 
 		return available, nil
 	}
 
-	// Become the leader for this adamId, or wait for the in-flight lookup.
 	d.mu.Lock()
 	f, ok := d.flights[adamID]
 	if !ok {
@@ -93,12 +111,6 @@ func (d *Detector) Detect(ctx context.Context, adamID string, regions []string) 
 			d.mu.Unlock()
 			close(f.done)
 		}()
-
-		available, missing = d.fromCache(adamID, regions)
-		if len(missing) == 0 {
-			f.available = available
-			return available, nil
-		}
 
 		// Use a detached context for lookups so one cancelled request does
 		// not fail the detection for other in-flight requests of the same adamId.
@@ -122,7 +134,10 @@ func (d *Detector) Detect(ctx context.Context, adamID string, regions []string) 
 // resolve looks up the missing regions in parallel and returns the sorted
 // list of regions where the adamId is available, plus how many lookups failed.
 func (d *Detector) resolve(ctx context.Context, adamID string, regions, missing []string) ([]string, int) {
-	sem := make(chan struct{}, d.opts.Concurrency)
+	d.mu.RLock()
+	concurrency := d.opts.Concurrency
+	d.mu.RUnlock()
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var results sync.Map // region -> bool
 	var failures int
@@ -163,16 +178,19 @@ func (d *Detector) resolve(ctx context.Context, adamID string, regions, missing 
 }
 
 func (d *Detector) lookup(ctx context.Context, adamID, region string) (bool, error) {
-	u := fmt.Sprintf("%s?id=%s&country=%s",
-		strings.TrimRight(d.opts.LookupBase, "/"),
-		url.QueryEscape(adamID), url.QueryEscape(region))
+	d.mu.RLock()
+	base := strings.TrimRight(d.opts.LookupBase, "/")
+	client := d.client
+	d.mu.RUnlock()
+
+	u := fmt.Sprintf("%s?id=%s&country=%s", base, url.QueryEscape(adamID), url.QueryEscape(region))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("User-Agent", "wrapper-lite/1.0")
 	req.Header.Set("Accept", "application/json")
-	resp, err := d.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}

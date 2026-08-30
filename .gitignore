@@ -20,3 +20,5 @@ testdata/*.exe
 .idea/
 .DS_Store
 Thumbs.db
+
+.gocache/

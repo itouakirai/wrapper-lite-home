@@ -134,6 +134,25 @@ function renderBreakdown(el, data, emptyText) {
   }).join("");
 }
 
+function renderRankArray(el, rows, emptyText) {
+  const entries = Array.isArray(rows) ? rows : [];
+  if (entries.length === 0) {
+    el.innerHTML = `<div class="table-empty">${esc(emptyText || "暂无数据")}</div>`;
+    return;
+  }
+  const max = Math.max(...entries.map((x) => Number(x.count) || 0), 1);
+  el.innerHTML = entries.map((x) => {
+    const count = Number(x.count) || 0;
+    const p = Math.round((count / max) * 100);
+    return `
+      <div class="table-row">
+        <span class="table-name" title="${esc(x.ip)}">${esc(x.ip)}</span>
+        <div class="table-bar"><div class="table-bar-fill" style="width:${p}%"></div></div>
+        <span class="table-value">${fmt(count)}</span>
+      </div>`;
+  }).join("");
+}
+
 function renderStats(data) {
   const today = data.today || {};
   $("#stat-total").textContent = fmt(data.total);
@@ -159,6 +178,10 @@ function renderStats(data) {
 
   renderBreakdown($("#upstream-table"), data.upstreams_total, "暂无上游请求记录");
   renderBreakdown($("#endpoint-table"), today.endpoints, "今日暂无端点请求");
+  renderRankArray($("#ip-today-table"), data.client_ips_today, "今日暂无客户端请求");
+  renderRankArray($("#ip-total-table"), data.client_ips_total, "暂无客户端请求记录");
+  const tracked = Number(data.tracked_client_ips) || 0;
+  $("#ip-tracked-legend").textContent = tracked ? `已统计 ${fmt(tracked)} 个客户端 IP` : "";
 }
 
 function renderStatus(data) {
@@ -174,6 +197,46 @@ function renderStatus(data) {
     : "-";
 
   renderUptime(upstreams);
+  renderUpstreamAdmin(upstreams);
+}
+
+function renderUpstreamAdmin(upstreams) {
+  const list = $("#upstream-list");
+  if (!upstreams || upstreams.length === 0) {
+    list.innerHTML = `<div class="table-empty">暂无上游</div>`;
+    return;
+  }
+  list.innerHTML = upstreams.map((u) => {
+    const enabled = !!u.enabled;
+    const state = u.online ? "在线" : (u.backoff ? "退避中" : "离线");
+    return `
+      <div class="upstream-row">
+        <div class="upstream-main">
+          <div class="upstream-name" title="${esc(u.name)}">${esc(u.name)}</div>
+          <div class="upstream-url" title="${esc(u.base_url)}">${esc(u.base_url)}</div>
+        </div>
+        <div class="upstream-meta">
+          <span class="badge ${enabled ? "" : "empty"}">${enabled ? "启用" : "停用"}</span>
+          <span class="badge ${u.online ? "" : "empty"}">${esc(state)}</span>
+        </div>
+        <div class="upstream-actions">
+          <button class="btn btn-small" data-toggle="${esc(u.name)}" data-enabled="${enabled ? "false" : "true"}">${enabled ? "停用" : "启用"}</button>
+          <button class="btn btn-small btn-danger" data-delete="${esc(u.name)}">删除</button>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function setUpstreamMessage(text, isError) {
+  const el = $("#upstream-message");
+  if (!text) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = text;
+  el.classList.toggle("error", !!isError);
 }
 
 /* ---------- boot ---------- */
@@ -199,6 +262,61 @@ function bootDashboard() {
       busy = false;
     }
   }
+
+  async function afterMutation() {
+    setUpstreamMessage("");
+    await refresh();
+  }
+
+  $("#upstream-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("#upstream-name").value.trim();
+    const baseUrl = $("#upstream-url").value.trim();
+    const enabled = $("#upstream-enabled").checked;
+    if (!name || !baseUrl) {
+      setUpstreamMessage("名称和 Base URL 不能为空", true);
+      return;
+    }
+    try {
+      await api("/api/upstreams", {
+        method: "POST",
+        body: JSON.stringify({ name, base_url: baseUrl, enabled }),
+      });
+      $("#upstream-name").value = "";
+      $("#upstream-url").value = "";
+      $("#upstream-enabled").checked = true;
+      setUpstreamMessage("已添加上游：" + name);
+      await afterMutation();
+    } catch (err) {
+      setUpstreamMessage(err.message || "添加失败", true);
+    }
+  });
+
+  $("#upstream-list").addEventListener("click", async (e) => {
+    const deleteBtn = e.target.closest("[data-delete]");
+    const toggleBtn = e.target.closest("[data-toggle]");
+    try {
+      if (deleteBtn) {
+        const name = deleteBtn.getAttribute("data-delete");
+        if (!window.confirm(`确定删除上游 ${name} 吗？`)) return;
+        await api("/api/upstreams/" + encodeURIComponent(name), { method: "DELETE" });
+        setUpstreamMessage("已删除上游：" + name);
+        await afterMutation();
+      } else if (toggleBtn) {
+        const name = toggleBtn.getAttribute("data-toggle");
+        const enabled = toggleBtn.getAttribute("data-enabled") === "true";
+        await api("/api/upstreams/" + encodeURIComponent(name), {
+          method: "PATCH",
+          body: JSON.stringify({ enabled }),
+        });
+        setUpstreamMessage((enabled ? "已启用上游：" : "已停用上游：") + name);
+        await afterMutation();
+      }
+    } catch (err) {
+      setUpstreamMessage(err.message || "操作失败", true);
+    }
+  });
+
   refresh();
   setInterval(refresh, 10000);
 

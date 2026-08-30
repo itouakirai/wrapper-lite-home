@@ -49,6 +49,9 @@
   "upstream_timeout": "30s",
   "stats_file": "data/stats.json",
   "stats_save_interval": "30s",
+  "reload_interval": "2s",
+  "trust_proxy_headers": false,
+  "max_client_ips": 10000,
   "upstreams": [
     { "name": "US API", "base_url": "http://127.0.0.1:3001" },
     { "name": "CN API", "base_url": "http://127.0.0.1:3002" }
@@ -77,6 +80,9 @@
 | `upstream_timeout` | `30s` | 上游代理请求的超时时间 |
 | `stats_file` | `data/stats.json` | 统计数据持久化文件路径 |
 | `stats_save_interval` | `30s` | 统计数据落盘间隔 |
+| `reload_interval` | `2s` | 轮询配置文件并热重载的间隔 |
+| `trust_proxy_headers` | `false` | 是否使用 `X-Forwarded-For` / `X-Real-IP` 统计客户端 IP。仅在可信反向代理后启用 |
+| `max_client_ips` | `10000` | IP 排行计数器最多保留的独立客户端 IP 数 |
 | `upstreams[].name` | — | 上游名称（显示在后台） |
 | `upstreams[].base_url` | — | 上游 wrapper API 的基础地址 |
 | `upstreams[].enabled` | `true` | 该上游是否启用 |
@@ -112,18 +118,30 @@
 | `/api/logout` | POST | 清除会话 |
 | `/api/me` | GET | 返回当前用户名 |
 | `/api/status` | GET | 上游快照（在线状态、区域、延迟、可用率、退避状态） |
-| `/api/stats` | GET | 请求统计（总数、今日按小时、近 7 天、按上游、按端点） |
+| `/api/stats` | GET | 请求统计（总数、今日按小时、近 7 天、按上游、按端点、客户端 IP 排行） |
+| `/api/upstreams` | POST | 添加上游：`{"name":"...","base_url":"...","enabled":true}` |
+| `/api/upstreams/{name}` | PATCH | 启用/停用上游：`{"enabled":true}` |
+| `/api/upstreams/{name}` | DELETE | 删除上游 |
 
 ## 管理后台
 
 浏览器打开 `http://<host>:<port>/`。后台展示：
 
 - **统计卡片** — 总请求数、今日请求数、在线上游数、合并区域
+- **上游管理** — 无需手动编辑配置文件，即可添加、启用/停用、删除上游 API
 - **状态卡** — 每个上游一张，含在线/离线/退避指示、区域徽章、延迟、可用率百分比、最后检查时间
 - **小时柱状图** — 今日请求按小时分布
 - **7 日柱状图** — 最近 7 天的每日总数
 - **按 API 明细** — 每个上游请求数的横向柱状图
 - **按端点明细** — 今日各端点（/m3u8、/key 等）的请求数
+- **客户端 IP 排行** — 今日和累计访问公共代理端点的客户端 IP Top 排行
+
+## 配置热重载
+
+程序会按 `reload_interval` 轮询配置文件。认证信息、会话有效期、区域检测、探测设置、上游超时、统计设置、客户端 IP 排行设置和上游列表的变更都会热生效，无需重启。
+修改 `listen` 仍需重启，因为 HTTP 监听套接字已经绑定。
+
+在后台添加或删除上游时，wrapper-lite 会把变更写回同一个配置文件，并立即应用。
 
 ## 区域路由逻辑
 

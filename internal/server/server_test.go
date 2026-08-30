@@ -93,6 +93,7 @@ func newTestApp(t *testing.T, availability func(id, country string) bool, mocks 
 
 	st := stats.New("", 0)
 	a := auth.New(cfg.Auth.Username, cfg.Auth.Password, time.Hour)
+	cfgMgr := config.NewManagerFromConfig(cfg)
 	up := upstream.NewManager(*cfg, st)
 	up.Start(context.Background())
 	t.Cleanup(up.Stop)
@@ -105,7 +106,7 @@ func newTestApp(t *testing.T, availability func(id, country string) bool, mocks 
 		LookupBase:    cfg.Region.LookupBase,
 	})
 
-	srv := New(cfg, a, st, up, det)
+	srv := New(cfgMgr, a, st, up, det)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts, ts.Client()
@@ -143,6 +144,31 @@ func doGet(t *testing.T, client *http.Client, url string, cookie *http.Cookie) (
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
+	}
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	return resp, out
+}
+
+func doJSON(t *testing.T, client *http.Client, method, url string, body any, cookie *http.Cookie) (*http.Response, map[string]any) {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, url, reader)
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	var out map[string]any
 	json.NewDecoder(resp.Body).Decode(&out)
@@ -222,6 +248,10 @@ func TestFullFlowRegionRouting(t *testing.T) {
 	if endpoints["m3u8"] == nil || endpoints["license"] == nil {
 		t.Fatalf("endpoints = %v", endpoints)
 	}
+	clientIPs, _ := sdata["client_ips_today"].([]any)
+	if len(clientIPs) == 0 {
+		t.Fatalf("client_ips_today = %v, want at least one ranked IP", sdata["client_ips_today"])
+	}
 
 	// admin status returns upstream snapshots
 	resp, out = doGet(t, client, ts.URL+"/api/status", cookie)
@@ -269,6 +299,43 @@ func TestLoginPageServed(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(b), "login-form") {
 		t.Fatalf("login page missing form")
+	}
+}
+
+func TestUpstreamCRUD(t *testing.T) {
+	upUS := newMockUpstream(t, "US", []string{"us"})
+	upExtra := newMockUpstream(t, "EXTRA", []string{"jp"})
+	ts, client := newTestApp(t, func(id, country string) bool { return true }, upUS)
+	cookie := login(t, ts)
+
+	resp, out := doJSON(t, client, http.MethodPost, ts.URL+"/api/upstreams", map[string]any{
+		"name":     "extra",
+		"base_url": upExtra.srv.URL,
+		"enabled":  true,
+	}, cookie)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("add status = %d, body=%v", resp.StatusCode, out)
+	}
+
+	waitFor(t, func() bool {
+		resp, out := doGet(t, client, ts.URL+"/api/status", cookie)
+		if resp.StatusCode != 200 {
+			return false
+		}
+		data, _ := out["data"].(map[string]any)
+		ups, _ := data["upstreams"].([]any)
+		return len(ups) == 2
+	})
+
+	resp, out = doJSON(t, client, http.MethodDelete, ts.URL+"/api/upstreams/extra", nil, cookie)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d, body=%v", resp.StatusCode, out)
+	}
+	resp, out = doGet(t, client, ts.URL+"/api/status", cookie)
+	data, _ := out["data"].(map[string]any)
+	ups, _ := data["upstreams"].([]any)
+	if len(ups) != 1 {
+		t.Fatalf("upstreams after delete = %d, want 1", len(ups))
 	}
 }
 

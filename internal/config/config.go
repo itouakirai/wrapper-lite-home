@@ -1,3 +1,4 @@
+// Package config loads and validates the JSON configuration.
 package config
 
 import (
@@ -36,6 +37,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
 type Config struct {
 	Listen          string       `json:"listen"`
 	Auth            AuthConfig   `json:"auth"`
@@ -46,6 +51,9 @@ type Config struct {
 	Upstreams       []Upstream   `json:"upstreams"`
 	StatsFile       string       `json:"stats_file"`
 	StatsInterval   Duration     `json:"stats_save_interval"`
+	ReloadInterval  Duration     `json:"reload_interval"`
+	TrustProxy      bool         `json:"trust_proxy_headers"`
+	MaxClientIPs    int          `json:"max_client_ips"`
 }
 
 type AuthConfig struct {
@@ -104,6 +112,8 @@ func Default() *Config {
 		UpstreamTimeout: Duration(30 * time.Second),
 		StatsFile:       "data/stats.json",
 		StatsInterval:   Duration(30 * time.Second),
+		ReloadInterval:  Duration(2 * time.Second),
+		MaxClientIPs:    10000,
 	}
 }
 
@@ -119,6 +129,12 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if cfg.ReloadInterval <= 0 {
+		cfg.ReloadInterval = Duration(2 * time.Second)
+	}
+	if cfg.MaxClientIPs <= 0 {
+		cfg.MaxClientIPs = 10000
+	}
 	return cfg, nil
 }
 
@@ -132,10 +148,15 @@ func (c *Config) Validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream is required")
 	}
+	seen := make(map[string]bool, len(c.Upstreams))
 	for i, u := range c.Upstreams {
 		if u.Name == "" {
 			return fmt.Errorf("upstream %d: name is required", i)
 		}
+		if seen[u.Name] {
+			return fmt.Errorf("upstream %d: duplicate name %q", i, u.Name)
+		}
+		seen[u.Name] = true
 		if u.BaseURL == "" {
 			return fmt.Errorf("upstream %d: base_url is required", i)
 		}
@@ -145,6 +166,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Region.Concurrency < 1 {
 		return fmt.Errorf("region.concurrency must be >= 1")
+	}
+	if c.ReloadInterval <= 0 {
+		return fmt.Errorf("reload_interval must be positive")
+	}
+	if c.MaxClientIPs < 0 {
+		return fmt.Errorf("max_client_ips must be non-negative")
 	}
 	return nil
 }
